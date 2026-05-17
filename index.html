@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>GroupAssign - 소모임 조 편성</title>
+<meta name="description" content="카카오톡 일정 캡처본에서 참석자를 인식하여 소모임 조를 자동 편성하는 웹앱">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: { sans: ['Inter', 'sans-serif'] },
+    }
+  }
+}
+</script>
+<style>
+  * { -webkit-tap-highlight-color: transparent; }
+  body { font-family: 'Inter', sans-serif; background: #0f172a; }
+  .sortable-ghost { opacity: 0.4; transform: scale(0.95); }
+  .sortable-chosen { transform: scale(1.05); box-shadow: 0 8px 25px rgba(99,102,241,0.4); z-index: 50; }
+  .sortable-drag { opacity: 0.9; }
+  .chip { transition: transform 0.15s ease, box-shadow 0.15s ease; cursor: grab; touch-action: none; }
+  .chip:active { cursor: grabbing; }
+  @keyframes fadeInUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+  .animate-in { animation: fadeInUp 0.3s ease forwards; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { animation: spin 1s linear infinite; }
+  @keyframes pulse-border { 0%,100%{ border-color: rgba(99,102,241,0.3); } 50%{ border-color: rgba(99,102,241,0.7); } }
+  .drop-zone-empty { animation: pulse-border 2s ease-in-out infinite; }
+  .group-container { min-height: 60px; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+</style>
+</head>
+<body class="min-h-screen bg-slate-900 text-slate-100">
+
+<!-- Loading Overlay -->
+<div id="loadingOverlay" class="fixed inset-0 bg-slate-900/90 backdrop-blur-sm z-50 flex-col items-center justify-center hidden">
+  <div class="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full spinner mb-4"></div>
+  <p id="loadingText" class="text-lg font-semibold text-indigo-300">이미지 분석 중...</p>
+  <p id="loadingSubText" class="text-sm text-slate-400 mt-1">잠시만 기다려 주세요</p>
+</div>
+
+<!-- Main App Container -->
+<div class="max-w-md mx-auto px-4 py-6 pb-32">
+
+  <!-- Test button (top-left, half width) -->
+  <button id="testBtn" onclick="loadTestData()" class="w-1/2 mb-3 py-2 rounded-xl bg-slate-800/60 border border-slate-700 text-slate-500 text-xs hover:bg-slate-700 hover:border-slate-500 transition-all active:scale-[0.97]">
+    🧪 테스트
+  </button>
+
+  <!-- Header -->
+  <header class="text-center mb-6">
+    <h1 class="text-2xl font-extrabold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
+      ✨ GroupAssign
+    </h1>
+    <p class="text-slate-400 text-sm mt-1">카카오톡 일정 캡처 → 자동 조 편성</p>
+  </header>
+
+  <!-- Upload Section -->
+  <section class="mb-5">
+    <label for="imageInput" class="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-slate-600 rounded-2xl bg-slate-800/50 hover:border-indigo-500 hover:bg-slate-800 transition-all cursor-pointer active:scale-[0.98]">
+      <svg class="w-8 h-8 text-slate-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+      <span class="text-sm text-slate-400">캡처본 이미지 업로드 (복수 선택 가능)</span>
+    </label>
+    <input id="imageInput" type="file" multiple accept="image/*" class="hidden">
+  </section>
+
+  <!-- Controls -->
+  <section id="controls" class="mb-5">
+    <div class="flex gap-2 mb-3">
+      <span class="text-xs text-slate-400 self-center mr-1 whitespace-nowrap">조 개수</span>
+      <button onclick="setGroupCount(2)" id="gc2" class="flex-1 py-2.5 rounded-xl text-sm font-semibold border border-indigo-500 bg-indigo-600 text-white transition-all active:scale-95">2조</button>
+      <button onclick="setGroupCount(3)" id="gc3" class="flex-1 py-2.5 rounded-xl text-sm font-semibold border border-slate-600 bg-slate-800 text-slate-300 transition-all active:scale-95">3조</button>
+      <button onclick="setGroupCount(4)" id="gc4" class="flex-1 py-2.5 rounded-xl text-sm font-semibold border border-slate-600 bg-slate-800 text-slate-300 transition-all active:scale-95">4조</button>
+    </div>
+    <div class="grid grid-cols-2 gap-2">
+      <button onclick="autoAssign()" class="py-2.5 rounded-xl text-sm font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-all active:scale-95">🔀 자동배정</button>
+      <button onclick="resetAll()" class="py-2.5 rounded-xl text-sm font-semibold bg-slate-700 hover:bg-slate-600 text-slate-200 transition-all active:scale-95">🔄 초기화</button>
+    </div>
+  </section>
+
+  <!-- Unassigned Pool -->
+  <section id="poolSection" class="mb-4">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-sm font-bold text-slate-300">📌 미배정 인원 <span id="poolCount" class="text-indigo-400">(0)</span></h2>
+    </div>
+    <div id="pool" class="group-container min-h-[60px] p-3 rounded-2xl bg-slate-800/80 border border-slate-700 flex flex-wrap gap-2 content-start">
+    </div>
+    <!-- Add name input -->
+    <div class="flex gap-2 mt-2">
+      <input id="addNameInput" type="text" placeholder="이름 입력 후 추가" class="flex-1 px-3 py-2.5 rounded-xl bg-slate-800 border border-slate-600 text-white text-sm placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors" onkeydown="if(event.key==='Enter')addName()">
+      <button onclick="addName()" class="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold transition-all active:scale-95 whitespace-nowrap">+ 추가</button>
+    </div>
+  </section>
+
+  <!-- Group Containers -->
+  <div id="groupsWrapper" class="space-y-4"></div>
+
+  <!-- Result Preview -->
+  <div id="resultPreview" class="mt-6 p-4 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-sm whitespace-pre-wrap leading-relaxed hidden"></div>
+
+  <!-- Final Action -->
+  <button id="copyBtn" onclick="copyResult()" class="w-full mt-3 py-3.5 rounded-xl text-base font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] hidden">
+    📋 결과 복사하기
+  </button>
+
+  <!-- Hidden canvas for image preprocessing -->
+  <canvas id="preprocessCanvas" class="hidden"></canvas>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-20 left-1/2 -translate-x-1/2 px-5 py-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/30 transition-all duration-300 opacity-0 pointer-events-none translate-y-4 z-40"></div>
+</div>
+
+<script>
+// ===== STATE =====
+let attendees = []; // { name, groupId: null | 'A' | 'B' | 'C' | 'D' }
+let groupCount = 3;
+let nameMatchMap = {}; // loaded from name_match.json
+
+// ===== LOAD NAME MATCH MAP =====
+async function loadNameMatch() {
+  try {
+    const resp = await fetch('name_match.json');
+    if (resp.ok) nameMatchMap = await resp.json();
+    console.log('name_match.json loaded:', nameMatchMap);
+  } catch (e) {
+    console.warn('name_match.json not found, skipping alias resolution');
+  }
+}
+function resolveNames(names) {
+  return [...new Set(names.map(n => nameMatchMap[n] || n))];
+}
+loadNameMatch();
+
+// ===== LOAD IGNORE PARSING LIST =====
+let ignoreParsingList = ['참석', '불참', '응답', '미응답', '리스트', '주최자', '짧음', '보여', '시작', '확인', '토하'];
+async function loadIgnoreParsing() {
+  try {
+    const resp = await fetch('ignore_parsing.json', { cache: 'no-store' }); // Prevent caching
+    if (resp.ok) ignoreParsingList = await resp.json();
+    console.log('ignore_parsing.json loaded:', ignoreParsingList);
+  } catch (e) {
+    console.warn('ignore_parsing.json not found, using default ignore list');
+  }
+}
+loadIgnoreParsing();
+const GROUP_LABELS = ['A', 'B', 'C', 'D'];
+const GROUP_COLORS = {
+  A: { bg: 'bg-blue-900/40', border: 'border-blue-500/50', chip: 'bg-blue-600', badge: 'bg-blue-500', text: 'text-blue-300', emoji: '🔹' },
+  B: { bg: 'bg-amber-900/40', border: 'border-amber-500/50', chip: 'bg-amber-600', badge: 'bg-amber-500', text: 'text-amber-300', emoji: '🔸' },
+  C: { bg: 'bg-emerald-900/40', border: 'border-emerald-500/50', chip: 'bg-emerald-600', badge: 'bg-emerald-500', text: 'text-emerald-300', emoji: '🟢' },
+  D: { bg: 'bg-purple-900/40', border: 'border-purple-500/50', chip: 'bg-purple-600', badge: 'bg-purple-500', text: 'text-purple-300', emoji: '🟣' },
+};
+
+// ===== TEST DATA (from name_match.json) =====
+async function loadTestData() {
+  // Removed confirm() dialog because browsers may silently block it if dismissed previously
+
+  
+  try {
+    const resp = await fetch('name_match.json');
+    if (resp.ok) {
+      nameMatchMap = await resp.json();
+    }
+  } catch (e) {
+    console.warn('Failed to refresh name_match.json', e);
+  }
+
+  // Use the first 8 canonical names (values) from name_match.json as test data
+  const allNames = Object.values(nameMatchMap);
+  const unique = [...new Set(allNames)].slice(0, 8);
+  
+  if (unique.length === 0) {
+    showToast('⚠️ name_match.json이 비어있습니다');
+    return;
+  }
+  
+  // Clear existing before loading test data to ensure visible action
+  attendees = [];
+  initAttendees(unique);
+  showToast(`✅ 테스트 데이터 ${unique.length}명 로드 완료`);
+}
+
+// ===== IMAGE UPLOAD & OCR =====
+document.getElementById('imageInput').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  showLoading(true);
+  let allNames = [];
+  for (let i = 0; i < files.length; i++) {
+    updateLoadingText(`이미지 ${i+1}/${files.length} 분석 중...`);
+    const processed = await preprocessImage(files[i]);
+    const names = await ocrAndParse(processed);
+    allNames.push(...names);
+  }
+  showLoading(false);
+  const unique = resolveNames(allNames);
+  if (unique.length === 0) {
+    showToast('⚠️ 참석자를 인식하지 못했습니다');
+    return;
+  }
+  // Merge with existing if any
+  const existingNames = new Set(attendees.map(a => a.name));
+  const newNames = unique.filter(n => !existingNames.has(n));
+  if (newNames.length > 0) {
+    newNames.forEach(name => attendees.push({ name, groupId: null }));
+    renderAll();
+    showControls();
+  }
+  showToast(`✅ ${newNames.length}명 추가 (총 ${attendees.length}명)`);
+  e.target.value = '';
+});
+
+async function preprocessImage(file) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.getElementById('preprocessCanvas');
+      const ctx = canvas.getContext('2d');
+      // Use full image (no cropping)
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+
+      // Detect dark mode
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      let darkPixels = 0, totalSampled = 0;
+      const sampleSize = Math.min(100, canvas.width, canvas.height);
+      for (let y = 0; y < sampleSize; y++) {
+        for (let x = 0; x < sampleSize; x++) {
+          const idx = (y * canvas.width + x) * 4;
+          const brightness = (data[idx] + data[idx+1] + data[idx+2]) / 3;
+          if (brightness < 80) darkPixels++;
+          totalSampled++;
+        }
+      }
+      const isDark = (darkPixels / totalSampled) > 0.6;
+
+      // Grayscale + invert if dark + contrast boost + Color Filter
+      for (let y = 0; y < canvas.height; y++) {
+        for (let x = 0; x < canvas.width; x++) {
+          const i = (y * canvas.width + x) * 4;
+          const r = data[i];
+          const g = data[i+1];
+          const b = data[i+2];
+          
+          // Calculate color difference to detect colorful areas (profile pics, emojis)
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          
+          let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+          if (isDark) gray = 255 - gray;
+          
+          // If the pixel has significant color (not grayscale), erase it (make it white)
+          // This removes profile pictures and emojis without cropping text.
+          if (max - min > 20) {
+            gray = 255;
+          } else {
+            gray = gray < 128 ? Math.max(0, gray * 0.5) : Math.min(255, gray * 1.3 + 30);
+          }
+          
+          data[i] = data[i+1] = data[i+2] = gray;
+        }
+      }
+      ctx.putImageData(imageData, 0, 0);
+      canvas.toBlob(blob => resolve(blob), 'image/png');
+    };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+async function ocrAndParse(imageBlob) {
+  try {
+    const result = await Tesseract.recognize(imageBlob, 'kor+eng', {
+      logger: m => {
+        if (m.status === 'recognizing text') {
+          const pct = Math.round((m.progress || 0) * 100);
+          document.getElementById('loadingSubText').textContent = `OCR 진행률: ${pct}%`;
+        }
+      }
+    });
+    const text = result.data.text;
+    console.log('[OCR Raw Text]', text);
+    return parseAttendees(text);
+  } catch (err) {
+    console.error('OCR Error:', err);
+    return [];
+  }
+}
+
+function parseAttendees(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  let rawNames = [];
+  let isAttending = false;
+
+  console.log('[Parser] Total lines:', lines.length);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Ignore page title headers
+    if (/리스트/.test(line) || /참\s*[석색]\s*및\s*불\s*[참침]/.test(line)) {
+      console.log(`[Parser] Ignoring title line: ${line}`);
+      continue;
+    }
+
+    // Detect start of "참석" section
+    if (/참\s*[석색]\s*\d+/.test(line) || /응\s*[답탑]\s*\d+/.test(line) || /<.*명/.test(line)) {
+      isAttending = true;
+      continue;
+    }
+
+    // Detect end of "참석" section (start of "불참" or "미응답" or "미정")
+    // Require a digit after 불참, OR it must be exactly "불참"
+    if (/불\s*[참침]\s*\d+/.test(line) || /^불\s*[참침]$/.test(line) || /미\s*응\s*[답탑]/.test(line) || /미\s*정/.test(line)) {
+      isAttending = false;
+      console.log(`[Parser] Hit 불참/미응답/미정 section at line ${i}: "${line}" — stopping`);
+      break;
+    }
+    
+    if (isAttending) {
+      // Ignore sub-headers
+      if (/참\s*[석색]\s*\d+/.test(line) || /주최자/.test(line)) continue;
+      rawNames.push(line);
+    }
+  }
+
+  // Fallback: If no explicit header found, treat everything before "불참" as attending
+  if (rawNames.length === 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (/리스트/.test(line) || /참\s*[석색]\s*및\s*불\s*[참침]/.test(line)) continue;
+      
+      if (/불\s*[참침]\s*\d+/.test(line) || /^불\s*[참침]$/.test(line) || /미\s*응\s*[답탑]/.test(line) || /미\s*정/.test(line)) break;
+      if (/참\s*[석색]\s*\d+/.test(line) || /주최자/.test(line) || /응\s*[답탑]\s*\d+/.test(line) || /<.*명/.test(line)) continue;
+      rawNames.push(line);
+    }
+  }
+
+  console.log('[Parser] Raw name lines collected:', rawNames);
+
+  let extracted = [];
+  
+  // Create population list for matching
+  const populationKeys = Object.keys(nameMatchMap);
+  const populationValues = Object.values(nameMatchMap);
+  const uniquePop = [...new Set([...populationKeys, ...populationValues])];
+  
+  // Sort descending by length so longer names match first (e.g. "Jacob 영진" before "Jacob")
+  uniquePop.sort((a, b) => b.length - a.length);
+
+  for (const raw of rawNames) {
+    const name = extractNameFromLine(raw, uniquePop);
+    if (name) {
+      // Normalize to canonical name from JSON, if available
+      const canonical = nameMatchMap[name] || name;
+      extracted.push(canonical);
+      console.log(`[Parser] Found name: ${name} -> Canonical: ${canonical}`);
+    }
+  }
+
+  // Deduplicate
+  extracted = [...new Set(extracted)];
+
+  console.log('[Parser] Final extracted names:', extracted);
+  return extracted;
+}
+
+// ===== FUZZY MATCHING (Levenshtein Distance) =====
+function levenshtein(a, b) {
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function extractNameFromLine(raw, uniquePop) {
+  let s = raw.trim();
+  s = s.replace(/주최자/g, '').trim();
+  s = s.replace(/[^\w\s가-힣\(\)]/g, ' ').trim();
+  s = s.replace(/\s+/g, ' ');
+
+  if (!s || s.length < 2) return null;
+
+  // 1. Check against population first (exact or contains)
+  for (const known of uniquePop) {
+    if (s.includes(known)) return known;
+    
+    // For Korean names (2+ syllables), try to find consecutive syllables in the raw text
+    const korChars = known.match(/[가-힣]+/g);
+    if (korChars) {
+      for (const kor of korChars) {
+        if (kor.length >= 2) {
+          for (let i = 0; i <= kor.length - 2; i++) {
+            if (s.includes(kor.substring(i, i+2))) return known;
+          }
+        }
+      }
+    }
+    
+    // For English names (3+ chars), check case insensitive
+    const eng = known.match(/[A-Za-z]{3,}/);
+    if (eng && s.toLowerCase().includes(eng[0].toLowerCase())) {
+      return known;
+    }
+  }
+
+  const noise = ignoreParsingList.map(n => n.toLowerCase());
+  const lowerS = s.toLowerCase();
+  
+  // If the line contains a multi-word noise phrase (like '알 수 없음') or exactly matches a noise word
+  for (const n of noise) {
+    if (n.includes(' ') && lowerS.includes(n)) return null;
+    if (lowerS === n) return null;
+  }
+
+  // 1.5. Fuzzy Match against population
+  const wordsForFuzzy = s.split(/\s+/).filter(w => !noise.includes(w.toLowerCase()));
+  let bestMatch = null;
+  let minDistance = Infinity;
+
+  for (const known of uniquePop) {
+    // Distance tolerance: 1 for 2-char names, 2 for 3-5 char names, 3 for 6+ char names (English)
+    const maxDist = known.length <= 2 ? 1 : (known.length >= 6 ? 3 : 2);
+    
+    // Check individual words
+    for (const fw of wordsForFuzzy) {
+      if (fw.length < 2) continue;
+      const d = levenshtein(fw.toLowerCase(), known.toLowerCase());
+      if (d <= maxDist && d < minDistance) {
+        minDistance = d;
+        bestMatch = known;
+      }
+    }
+    
+    // Check combination of 2 consecutive words (for names with spaces)
+    if (wordsForFuzzy.length >= 2) {
+      for (let i = 0; i < wordsForFuzzy.length - 1; i++) {
+        const combined = wordsForFuzzy[i] + ' ' + wordsForFuzzy[i+1];
+        const d = levenshtein(combined.toLowerCase(), known.toLowerCase());
+        if (d <= maxDist && d < minDistance) {
+          minDistance = d;
+          bestMatch = known;
+        }
+      }
+    }
+  }
+
+  if (bestMatch) {
+    console.log(`[Fuzzy Match] Corrected to "${bestMatch}" (distance: ${minDistance})`);
+    return bestMatch;
+  }
+  
+  // 2. Loose extraction for names not in JSON (like "강신우", "예림")
+  // Try pattern matching for mixed cases if individual words don't match
+  // English (Korean) - e.g., "Annie (애니)"
+  const p1 = s.match(/([A-Z][a-zA-Z]+\s*\([가-힣]+\))/);
+  if (p1) return p1[1];
+
+  // English English - e.g., "Kiyoon Kim"
+  const p2 = s.match(/([A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+)/);
+  if (p2) return p2[1];
+
+  // English Korean - e.g., "Jacob 영진"
+  const p3 = s.match(/([A-Z][a-zA-Z]+\s+[가-힣]{2,})/);
+  if (p3) return p3[1];
+
+  // Korean Space Korean - e.g., "폴 정훈"
+  const p4 = s.match(/([가-힣]+\s+[가-힣]{2,})/);
+  if (p4) return p4[1];
+
+  // Loose extraction: Just pick whatever looks like a valid name segment
+  const words = s.split(/\s+/);
+  for (const w of words) {
+    if (noise.includes(w.toLowerCase())) continue; // Ignore noisy words
+
+    if (w.match(/^[가-힣]{2,4}$/)) return w;
+    if (w.match(/^[A-Z][a-zA-Z]{2,}$/)) return w; // Capitalized English 3+ chars
+    if (w.match(/^[A-Z]{2}$/)) return w; // e.g. EJ
+  }
+  
+  return null;
+}
+
+// ===== INIT & RENDER =====
+function initAttendees(nameList) {
+  // Merge with existing, avoid duplicates
+  const existingNames = new Set(attendees.map(a => a.name));
+  const newOnes = nameList.filter(n => !existingNames.has(n));
+  newOnes.forEach(name => attendees.push({ name, groupId: null }));
+  renderAll();
+  showControls();
+}
+
+function showControls() {
+  document.getElementById('controls').classList.remove('hidden');
+  document.getElementById('poolSection').classList.remove('hidden');
+  document.getElementById('groupsWrapper').classList.remove('hidden');
+}
+
+function renderAll() {
+  renderPool();
+  renderGroups();
+  updateCounts();
+  updateResultPreview();
+  initSortables();
+}
+
+function createChip(att) {
+  const colorClass = att.groupId ? GROUP_COLORS[att.groupId].chip : 'bg-slate-600';
+  return `<div class="chip animate-in inline-flex items-center gap-1.5 pl-3.5 pr-2 py-2 rounded-xl ${colorClass} text-white text-sm font-medium shadow-md select-none" data-name="${att.name}">
+    <span>${att.name}</span>
+    <button onclick="event.stopPropagation();removeName('${att.name.replace(/'/g, "\\'")}')"
+      class="w-5 h-5 flex items-center justify-center rounded-full bg-white/20 hover:bg-white/40 text-xs leading-none transition-colors"
+      title="제거">✕</button>
+  </div>`;
+}
+
+function renderPool() {
+  const pool = document.getElementById('pool');
+  const unassigned = attendees.filter(a => !a.groupId);
+  pool.innerHTML = unassigned.length
+    ? unassigned.map(a => createChip(a)).join('')
+    : '<p class="text-xs text-slate-500 w-full text-center py-2">모든 인원이 배정되었습니다</p>';
+  if (unassigned.length === 0 && attendees.length > 0) {
+    pool.classList.remove('drop-zone-empty');
+  } else if (attendees.length > 0) {
+    pool.classList.add('drop-zone-empty');
+  }
+}
+
+function renderGroups() {
+  const wrapper = document.getElementById('groupsWrapper');
+  wrapper.innerHTML = '';
+  for (let i = 0; i < groupCount; i++) {
+    const label = GROUP_LABELS[i];
+    const color = GROUP_COLORS[label];
+    const members = attendees.filter(a => a.groupId === label);
+    const html = `
+      <section class="animate-in">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="inline-block w-3 h-3 rounded-full ${color.badge}"></span>
+          <h2 class="text-sm font-bold ${color.text}">${color.emoji} ${label}조 <span class="text-slate-400 font-normal">(${members.length}명)</span></h2>
+        </div>
+        <div id="group-${label}" class="group-container min-h-[60px] p-3 rounded-2xl ${color.bg} border ${color.border} flex flex-wrap gap-2 content-start ${members.length === 0 ? 'drop-zone-empty' : ''}">
+          ${members.length
+            ? members.map(a => createChip(a)).join('')
+            : '<p class="text-xs text-slate-500 w-full text-center py-2">드래그하여 배정하세요</p>'
+          }
+        </div>
+      </section>`;
+    wrapper.insertAdjacentHTML('beforeend', html);
+  }
+}
+
+function updateCounts() {
+  const unassigned = attendees.filter(a => !a.groupId).length;
+  document.getElementById('poolCount').textContent = `(${unassigned}명)`;
+}
+
+// ===== SORTABLE =====
+let sortableInstances = [];
+function initSortables() {
+  sortableInstances.forEach(s => s.destroy());
+  sortableInstances = [];
+  const containers = [document.getElementById('pool')];
+  for (let i = 0; i < groupCount; i++) {
+    const el = document.getElementById('group-' + GROUP_LABELS[i]);
+    if (el) containers.push(el);
+  }
+  containers.forEach(el => {
+    const s = new Sortable(el, {
+      group: 'attendees',
+      animation: 200,
+      delay: 120,
+      delayOnTouchOnly: true,
+      fallbackOnBody: true,
+      swapThreshold: 0.65,
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      dragClass: 'sortable-drag',
+      onEnd: (evt) => {
+        const name = evt.item.dataset.name;
+        const toId = evt.to.id;
+        const att = attendees.find(a => a.name === name);
+        if (!att) return;
+        if (toId === 'pool') {
+          att.groupId = null;
+        } else {
+          const groupLabel = toId.replace('group-', '');
+          att.groupId = groupLabel;
+        }
+        // Remove placeholder text if present
+        evt.to.querySelectorAll('p').forEach(p => p.remove());
+        renderAll();
+      }
+    });
+    sortableInstances.push(s);
+  });
+}
+
+// ===== GROUP COUNT =====
+function setGroupCount(n) {
+  groupCount = n;
+  // Move members of removed groups back to pool
+  const activeLabels = GROUP_LABELS.slice(0, n);
+  attendees.forEach(a => {
+    if (a.groupId && !activeLabels.includes(a.groupId)) {
+      a.groupId = null;
+    }
+  });
+  // Update button styles
+  [2,3,4].forEach(c => {
+    const btn = document.getElementById('gc' + c);
+    if (c === n) {
+      btn.className = 'flex-1 py-2.5 rounded-xl text-sm font-semibold border border-indigo-500 bg-indigo-600 text-white transition-all active:scale-95';
+    } else {
+      btn.className = 'flex-1 py-2.5 rounded-xl text-sm font-semibold border border-slate-600 bg-slate-800 text-slate-300 transition-all active:scale-95';
+    }
+  });
+  renderAll();
+}
+
+// ===== AUTO ASSIGN (Fisher-Yates + Even Distribution) =====
+function autoAssign() {
+  const unassigned = attendees.filter(a => !a.groupId);
+  if (unassigned.length === 0) {
+    showToast('⚠️ 배정할 인원이 없습니다');
+    return;
+  }
+  // Fisher-Yates shuffle
+  for (let i = unassigned.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [unassigned[i], unassigned[j]] = [unassigned[j], unassigned[i]];
+  }
+  // Calculate current group sizes
+  const activeLabels = GROUP_LABELS.slice(0, groupCount);
+  const groupSizes = {};
+  activeLabels.forEach(l => {
+    groupSizes[l] = attendees.filter(a => a.groupId === l).length;
+  });
+  // Distribute evenly: always assign to the group with fewest members
+  unassigned.forEach(att => {
+    const minLabel = activeLabels.reduce((a, b) => groupSizes[a] <= groupSizes[b] ? a : b);
+    att.groupId = minLabel;
+    groupSizes[minLabel]++;
+  });
+  renderAll();
+  showToast(`✅ ${unassigned.length}명 자동 배정 완료`);
+}
+
+// ===== RESULT PREVIEW & COPY =====
+function generateResultText() {
+  const activeLabels = GROUP_LABELS.slice(0, groupCount);
+  const assignedExist = attendees.some(a => a.groupId);
+  if (!assignedExist) return null;
+  
+  let lines = ['[오늘의 소모임 조 편성]', ''];
+  activeLabels.forEach(label => {
+    const members = attendees.filter(a => a.groupId === label);
+    const emoji = GROUP_COLORS[label].emoji;
+    lines.push(`${emoji} ${label}조 (${members.length}명): ${members.map(m => m.name).join(', ')}`);
+  });
+  return lines.join('\n');
+}
+
+function updateResultPreview() {
+  const preview = document.getElementById('resultPreview');
+  const copyBtn = document.getElementById('copyBtn');
+  const text = generateResultText();
+  
+  if (text) {
+    preview.textContent = text;
+    preview.classList.remove('hidden');
+    copyBtn.classList.remove('hidden');
+  } else {
+    preview.classList.add('hidden');
+    copyBtn.classList.add('hidden');
+  }
+}
+
+function copyResult() {
+  const text = generateResultText();
+  if (!text) {
+    showToast('⚠️ 배정된 인원이 없습니다');
+    return;
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('📋 클립보드에 복사되었습니다');
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    showToast('📋 클립보드에 복사되었습니다');
+  });
+}
+
+// ===== ADD / REMOVE NAMES =====
+function addName() {
+  const input = document.getElementById('addNameInput');
+  const name = input.value.trim();
+  if (!name) return;
+  // Apply alias resolution
+  const resolved = nameMatchMap[name] || name;
+  if (attendees.some(a => a.name === resolved)) {
+    showToast(`⚠️ "${resolved}" 이미 존재합니다`);
+    input.value = '';
+    return;
+  }
+  attendees.push({ name: resolved, groupId: null });
+  input.value = '';
+  renderAll();
+  showControls();
+  showToast(`✅ "${resolved}" 추가됨`);
+}
+
+function removeName(name) {
+  attendees = attendees.filter(a => a.name !== name);
+  renderAll();
+  showToast(`🗑 "${name}" 제거됨`);
+}
+
+// ===== RESET =====
+function resetAll() {
+  attendees.forEach(a => a.groupId = null);
+  renderAll();
+  showToast('🔄 초기화 완료');
+}
+
+// ===== UI HELPERS =====
+function showLoading(show) {
+  const ol = document.getElementById('loadingOverlay');
+  ol.classList.toggle('hidden', !show);
+  ol.classList.toggle('flex', show);
+}
+function updateLoadingText(t) {
+  document.getElementById('loadingText').textContent = t;
+}
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-4');
+  t.classList.add('opacity-100', 'translate-y-0');
+  setTimeout(() => {
+    t.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+    t.classList.remove('opacity-100', 'translate-y-0');
+  }, 2200);
+}
+
+// Init groups on load
+setGroupCount(2);
+</script>
+</body>
+</html>
