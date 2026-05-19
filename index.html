@@ -399,10 +399,26 @@ function levenshtein(a, b) {
 function extractNameFromLine(raw, uniquePop) {
   let s = raw.trim();
   s = s.replace(/주최자/g, '').trim();
-  s = s.replace(/[^\w\s가-힣\(\)]/g, ' ').trim();
+  // Preserve "/" for bilingual names like "Drake/방군호"
+  s = s.replace(/[^\w\s가-힣\(\)\/]/g, ' ').trim();
   s = s.replace(/\s+/g, ' ');
 
   if (!s || s.length < 2) return null;
+
+  // Handle "English/Korean" bilingual names: check if the whole token matches a population entry
+  if (s.includes('/')) {
+    // Direct match with slash intact
+    for (const known of uniquePop) {
+      if (known.includes('/') && s.includes(known)) return known;
+    }
+    // Split by "/" and try each part individually
+    const slashParts = s.split('/').map(p => p.trim()).filter(Boolean);
+    for (const part of slashParts) {
+      for (const known of uniquePop) {
+        if (part === known || known.includes(part) || part.includes(known)) return known;
+      }
+    }
+  }
 
   // 1. Check against population first (exact or contains)
   for (const known of uniquePop) {
@@ -442,8 +458,9 @@ function extractNameFromLine(raw, uniquePop) {
   let minDistance = Infinity;
 
   for (const known of uniquePop) {
-    // Distance tolerance: 1 for 2-char names, 2 for 3-5 char names, 3 for 6+ char names (English)
-    const maxDist = known.length <= 2 ? 1 : (known.length >= 6 ? 3 : 2);
+    // Distance tolerance: tighter to reduce false positives on short names
+    // 1 for names <= 4 chars, 2 for 5-6 char names, 3 for 7+ char names
+    const maxDist = known.length <= 4 ? 1 : (known.length >= 7 ? 3 : 2);
     
     // Check individual words
     for (const fw of wordsForFuzzy) {
@@ -456,8 +473,10 @@ function extractNameFromLine(raw, uniquePop) {
     }
     
     // Check combination of 2 consecutive words (for names with spaces)
+    // Skip single-char words to prevent junk noise combos from matching
     if (wordsForFuzzy.length >= 2) {
       for (let i = 0; i < wordsForFuzzy.length - 1; i++) {
+        if (wordsForFuzzy[i].length < 2 || wordsForFuzzy[i+1].length < 2) continue;
         const combined = wordsForFuzzy[i] + ' ' + wordsForFuzzy[i+1];
         const d = levenshtein(combined.toLowerCase(), known.toLowerCase());
         if (d <= maxDist && d < minDistance) {
@@ -490,6 +509,10 @@ function extractNameFromLine(raw, uniquePop) {
   // Korean Space Korean - e.g., "폴 정훈"
   const p4 = s.match(/([가-힣]+\s+[가-힣]{2,})/);
   if (p4) return p4[1];
+
+  // English/Korean - e.g., "Drake/방군호"
+  const p5 = s.match(/([A-Z][a-zA-Z]+\/[가-힣]{2,})/);
+  if (p5) return p5[1];
 
   // Loose extraction: Just pick whatever looks like a valid name segment
   const words = s.split(/\s+/);
